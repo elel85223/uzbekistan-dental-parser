@@ -1,10 +1,13 @@
-# Важные файлы с паролями -  не загружать!
+# Важные файлы с паролями - НИКОГДА не загружать!
 *.json
 credentials/
 config/
 
 # Временные файлы
-*.txt
+last_page*.txt
 *.log
 __pycache__/
 *.pyc
+
+# НЕ игнорировать requirements.txt!
+!requirements.txt
