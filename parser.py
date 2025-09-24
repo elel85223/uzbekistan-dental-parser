@@ -1,20 +1,52 @@
+from seleniumbase import Driver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+import time
+import re
 import os
 import json
+from datetime import datetime
+import gspread
+from google.oauth2 import service_account
 
 class GoogleSheetsParser:
     def __init__(self):
-        # ... существующий код ...
+        self.driver = None
+        self.google_sheet_id = "1Xd4kikdV3FT8EtGYZOpCONfzs08gp86q8xEBE5OXbkY"
+        self.worksheet = None
+        self.dental_count = 0
+        self.processed_count = 0
+        self.skipped_count = 0
+        self.duplicates_count = 0
         
-        # Определяем окружение
+        # URL с нужными фильтрами
+        self.target_url = "https://license.gov.uz/registry?filter%5Bdocument_id%5D=2908&filter%5Bdocument_type%5D=LICENSE"
+        
+        # Кэш существующих записей для проверки дубликатов
+        self.existing_records = set()
+        
+        # ОПРЕДЕЛЯЕМ ОКРУЖЕНИЕ И ПУТИ
         if 'GITHUB_ACTIONS' in os.environ:
-            # В GitHub Actions credentials берем из переменной окружения
+            # В GitHub Actions
+            print("🤖 Запуск в GitHub Actions")
+            
+            # Credentials из переменной окружения
             credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
-            with open('temp_credentials.json', 'w') as f:
-                f.write(credentials_json)
-            self.credentials_file = 'temp_credentials.json'
+            if credentials_json:
+                with open('temp_credentials.json', 'w') as f:
+                    f.write(credentials_json)
+                self.credentials_file = 'temp_credentials.json'
+            else:
+                raise Exception("GOOGLE_CREDENTIALS не найден в переменных окружения")
+            
+            # Файл для сохранения последней страницы
+            self.last_page_file = "last_page_gsheets.txt"
         else:
-            # Локально используем обычный путь
+            # Локальный запуск
+            print("Локальный запуск")
             self.credentials_file = r"C:\Users\Vasiliy\Desktop\Парсер_лицензий\stomatologyscraper-7f64e5b6d7b7.json"
+            self.last_page_file = r"C:\Users\Vasiliy\Desktop\Парсер_лицензий\last_page_gsheets.txt"
     
     def setup_driver(self):
         """Настройка браузера"""
@@ -26,44 +58,14 @@ class GoogleSheetsParser:
         self.driver = Driver(
             browser="chrome",
             uc=True,
-            headless=headless,  # True в GitHub Actions
+            headless=headless,  # True в GitHub Actions, False локально
             locale_code="ru"
         )
         
         if headless:
             print("✓ Браузер запущен в headless режиме (GitHub Actions)")
         else:
-            print("✓ Браузер запущен")
-from seleniumbase import Driver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-import time
-import re
-import os
-from datetime import datetime
-import gspread
-from google.oauth2 import service_account
-
-class GoogleSheetsParser:
-    def __init__(self):
-        self.driver = None
-        self.google_sheet_id = "1Xd4kikdV3FT8EtGYZOpCONfzs08gp86q8xEBE5OXbkY"
-        self.worksheet = None
-        self.last_page_file = r"C:\Users\Vasiliy\Desktop\Парсер_лицензий\last_page_gsheets.txt"
-        self.dental_count = 0
-        self.processed_count = 0
-        self.skipped_count = 0
-        self.duplicates_count = 0
-        
-        # Путь к вашему JSON файлу с credentials
-        self.credentials_file = r"C:\Users\Vasiliy\Desktop\Парсер_лицензий\stomatologyscraper-7f64e5b6d7b7.json"
-        
-        # URL с нужными фильтрами - ПРАВИЛЬНЫЙ URL!
-        self.target_url = "https://license.gov.uz/registry?filter%5Bdocument_id%5D=2908&filter%5Bdocument_type%5D=LICENSE"
-        
-        # Кэш существующих записей для проверки дубликатов
-        self.existing_records = set()
+            print("✓ Браузер запущен в обычном режиме")
     
     def setup_google_sheets(self):
         """Настройка подключения к Google Sheets"""
@@ -108,7 +110,7 @@ class GoogleSheetsParser:
                     'ИНН',
                     'Флаг Сети',
                     'Название',
-                    'Дата окончания лицензии',  # ИЗМЕНЕНО с "Статус организации"!
+                    'Дата окончания лицензии',
                     'Адрес',
                     'Специализации в лицензии',
                     'ВидДеятельности'
@@ -144,9 +146,9 @@ class GoogleSheetsParser:
             
             # Пропускаем первую строку (заголовки)
             for row in all_values[1:]:
-                if len(row) >= 3:  # Минимум должно быть 3 колонки
-                    license_num = str(row[0]).strip()  # RegNumber_label - первая колонка
-                    inn = str(row[2]).strip()  # ИНН - третья колонка
+                if len(row) >= 3:  
+                    license_num = str(row[0]).strip()  
+                    inn = str(row[2]).strip()  
                     
                     if inn and license_num and inn != '' and license_num != '':
                         unique_key = f"{inn}_{license_num}"
@@ -160,7 +162,7 @@ class GoogleSheetsParser:
                 print(f"  Примеры ключей: {sample_keys}")
             
         except Exception as e:
-            print(f"  ⚠ Не удалось загрузить существующие записи: {str(e)}")
+            print(f"  Не удалось загрузить существующие записи: {str(e)}")
             print("  Продолжаем работу без проверки дубликатов")
     
     def check_duplicate(self, inn, license_num):
@@ -172,24 +174,11 @@ class GoogleSheetsParser:
         is_duplicate = unique_key in self.existing_records
         
         if is_duplicate:
-            print(f"    🔍 Проверка: ИНН={inn}, Лицензия={license_num} - ДУБЛИКАТ")
+            print(f"    Проверка: ИНН={inn}, Лицензия={license_num} - ДУБЛИКАТ")
         else:
-            print(f"    🔍 Проверка: ИНН={inn}, Лицензия={license_num} - новая запись")
+            print(f"    Проверка: ИНН={inn}, Лицензия={license_num} - новая запись")
             
         return is_duplicate
-    
-    def setup_driver(self):
-        """Настройка браузера"""
-        print("Запуск браузера...")
-        
-        self.driver = Driver(
-            browser="chrome",
-            uc=True,
-            headless=False,
-            locale_code="ru"
-        )
-        
-        print("✓ Браузер запущен")
     
     def get_last_processed_page(self):
         """Получает номер последней обработанной страницы"""
@@ -204,7 +193,9 @@ class GoogleSheetsParser:
     def save_last_processed_page(self, page_num):
         """Сохраняет номер последней обработанной страницы"""
         try:
-            os.makedirs(os.path.dirname(self.last_page_file), exist_ok=True)
+            # Для GitHub Actions не создаем директорию
+            if 'GITHUB_ACTIONS' not in os.environ:
+                os.makedirs(os.path.dirname(self.last_page_file), exist_ok=True)
             with open(self.last_page_file, 'w') as f:
                 f.write(str(page_num))
         except:
@@ -239,7 +230,7 @@ class GoogleSheetsParser:
             # Добавляем строку в таблицу
             self.worksheet.append_row(row_data, value_input_option='USER_ENTERED')
             
-            # ВАЖНО: Добавляем в кэш существующих записей сразу после сохранения
+            # Добавляем в кэш существующих записей сразу после сохранения
             if inn and license_num:
                 unique_key = f"{inn}_{license_num}"
                 self.existing_records.add(unique_key)
@@ -269,10 +260,10 @@ class GoogleSheetsParser:
                     self.existing_records.add(unique_key)
                 
                 self.dental_count += 1
-                print(f"    ✅ Сохранено после переподключения")
+                print(f"     Сохранено после переподключения")
                 return True
             except:
-                print(f"    ❌ Не удалось сохранить даже после переподключения")
+                print(f"    Не удалось сохранить даже после переподключения")
                 return False
     
     def select_russian_language(self):
@@ -281,12 +272,12 @@ class GoogleSheetsParser:
         
         try:
             # Шаг 1: Проверяем текущее состояние localStorage
-            print("  📍 Шаг 1: Проверка текущего языка...")
+            print("  Шаг 1: Проверка текущего языка...")
             current_lang = self.driver.execute_script("return localStorage.getItem('i18nextLng')")
             print(f"    Текущий язык в localStorage: {current_lang}")
             
             # Шаг 2: Принудительная установка через localStorage и cookies
-            print("  📍 Шаг 2: Установка языка через localStorage и cookies...")
+            print("  Шаг 2: Установка языка через localStorage и cookies...")
             self.driver.execute_script("""
                 // Устанавливаем все возможные ключи языка
                 localStorage.setItem('i18nextLng', 'ru');
@@ -309,18 +300,18 @@ class GoogleSheetsParser:
             print(f"    Новый язык в localStorage: {new_lang}")
             
             # Шаг 3: Обновляем страницу для применения
-            print("  📍 Шаг 3: Обновление страницы...")
+            print("   Шаг 3: Обновление страницы...")
             self.driver.refresh()
             time.sleep(5)  # Даём время на загрузку
             
             # Шаг 4: Проверяем результат
-            print("  📍 Шаг 4: Проверка результата...")
+            print("   Шаг 4: Проверка результата...")
             if self.check_interface_language():
-                print("  ✅ Русский язык успешно установлен через localStorage!")
+                print("   Русский язык успешно установлен через localStorage!")
                 return True
             
             # Шаг 5: Если не помогло - пробуем через клик по кнопке
-            print("  📍 Шаг 5: Попытка через клик по переключателю языка...")
+            print("   Шаг 5: Попытка через клик по переключателю языка...")
             
             # Сначала ищем видимый переключатель языка
             language_buttons = self.driver.find_elements(By.CSS_SELECTOR, """
@@ -373,7 +364,7 @@ class GoogleSheetsParser:
             
             # Шаг 6: Последняя проверка
             time.sleep(3)
-            print("  📍 Шаг 6: Финальная проверка...")
+            print("  Шаг 6: Финальная проверка...")
             
             # Пробуем найти русские слова на странице
             russian_elements = self.driver.find_elements(By.XPATH, """
@@ -385,15 +376,15 @@ class GoogleSheetsParser:
             """)
             
             if russian_elements:
-                print(f"  ✅ Найдено {len(russian_elements)} русских элементов на странице")
+                print(f"   Найдено {len(russian_elements)} русских элементов на странице")
                 return True
             else:
-                print("  ⚠️ ВНИМАНИЕ: Не удалось переключить на русский язык!")
+                print("  Не удалось переключить на русский язык!")
                 print("     Продолжаем работу с текущим языком интерфейса")
                 return False
                 
         except Exception as e:
-            print(f"  ❌ Критическая ошибка при переключении языка: {str(e)}")
+            print(f"   ошибка при переключении языка: {str(e)}")
             print("     Продолжаем работу с текущим языком")
             return False
     
@@ -401,7 +392,7 @@ class GoogleSheetsParser:
         """Проверка языка интерфейса (не названий компаний!)"""
         try:
             # Метод 1: Проверяем заголовки страницы
-            page_text = self.driver.find_element(By.TAG_NAME, 'body').text[:1000]  # Первые 1000 символов
+            page_text = self.driver.find_element(By.TAG_NAME, 'body').text[:1000]  
             
             # Ключевые русские слова интерфейса
             russian_interface_words = [
@@ -410,7 +401,6 @@ class GoogleSheetsParser:
                 'медицинская деятельность', 'Показать'
             ]
             
-            # Ключевые узбекские слова
             uzbek_interface_words = [
                 'Qidiruv', 'Reestr', 'Filter', 'Litsenziya',
                 'Tibbiyot', 'Hujjat turi', 'Xizmat',
@@ -455,11 +445,11 @@ class GoogleSheetsParser:
                 pass
             
             # Если ничего не нашли - считаем что не русский
-            print("    ⚠️ Не удалось определить язык интерфейса")
+            print("    Не удалось определить язык интерфейса")
             return False
                 
         except Exception as e:
-            print(f"    ❌ Ошибка проверки языка: {str(e)[:100]}")
+            print(f"    Ошибка проверки языка: {str(e)[:100]}")
             return False
     
     def wait_for_table_and_navigate(self, target_page):
@@ -484,7 +474,7 @@ class GoogleSheetsParser:
                 data_rows = [row for row in rows if row.text and ('Медицина' in row.text or 'Лицензия' in row.text)]
                 
                 if len(data_rows) > 0:
-                    print(f"✓ Таблица загружена, найдено {len(data_rows)} записей")
+                    print(f" Таблица загружена, найдено {len(data_rows)} записей")
                     
                     # Если нужно перейти на другую страницу
                     if target_page > 1:
@@ -494,11 +484,11 @@ class GoogleSheetsParser:
                         for page in range(2, target_page + 1):
                             success = self.go_to_page_number(page)
                             if not success:
-                                print(f"⚠ Не удалось перейти на страницу {page}")
+                                print(f" Не удалось перейти на страницу {page}")
                                 return False
                             time.sleep(3)  # Ждем загрузки страницы
                         
-                        print(f"✓ Перешли на страницу {target_page}")
+                        print(f" Перешли на страницу {target_page}")
                     
                     return True
                 
@@ -818,7 +808,6 @@ class GoogleSheetsParser:
             
             # Если дата окончания не найдена, пробуем найти в тексте по шаблону даты
             if 'Дата окончания' not in record:
-                import re
                 # Ищем даты в формате DD.MM.YYYY или YYYY-MM-DD после слов о сроке
                 for i, line in enumerate(lines):
                     if any(word in line.lower() for word in ['до', 'until', 'gacha', 'гача']):
@@ -827,7 +816,7 @@ class GoogleSheetsParser:
                             date_match = re.search(r'\d{2}\.\d{2}\.\d{4}|\d{4}-\d{2}-\d{2}', lines[k])
                             if date_match:
                                 record['Дата окончания'] = date_match.group()
-                                print(f"    📅 Найдена дата окончания (по шаблону): {date_match.group()}")
+                                print(f"    Найдена дата окончания: {date_match.group()}")
                                 break
                     
         except Exception as e:
@@ -1046,7 +1035,7 @@ class GoogleSheetsParser:
     def run(self):
         """Основной метод запуска парсера - ВСЕГДА С 1 СТРАНИЦЫ, ТОЛЬКО 2 СТРАНИЦЫ"""
         print("\n" + "="*60)
-        print("🤖 АВТОМАТИЧЕСКИЙ ПАРСЕР (ПЕРВЫЕ 2 СТРАНИЦЫ)")
+        print(" АВТОМАТИЧЕСКИЙ ПАРСЕР (ПЕРВЫЕ 2 СТРАНИЦЫ)")
         print("СТОМАТОЛОГИЧЕСКИХ ЛИЦЕНЗИЙ УЗБЕКИСТАНА")
         print("="*60)
         
@@ -1054,7 +1043,7 @@ class GoogleSheetsParser:
         try:
             self.setup_google_sheets()
         except Exception as e:
-            print(f"\n❌ Критическая ошибка: {str(e)}")
+            print(f"\nКритическая ошибка: {str(e)}")
             print("\nПроверьте:")
             print("1. Правильность пути к JSON файлу")
             print("2. Доступ сервисного аккаунта к таблице")
@@ -1067,14 +1056,14 @@ class GoogleSheetsParser:
         # ВСЕГДА начинаем с 1 страницы!
         start_page = 1
         
-        print(f"\n📊 СТАТИСТИКА:")
+        print(f"\n СТАТИСТИКА:")
         print(f"  • Записей в таблице: {len(self.existing_records)}")
         print(f"  • ВСЕГДА начинаем с страницы: 1")
         print(f"  • Будем обрабатывать только страницы: 1 и 2")
         
         # Попытка 1: Пробуем открыть с параметром языка в URL
-        print("\n🌐 Открываем сайт с предустановленными фильтрами...")
-        print("  📍 Попытка 1: URL с параметром языка...")
+        print("\n Открываем сайт с предустановленными фильтрами...")
+        print("   Попытка 1: URL с параметром языка...")
         
         # Пробуем URL с явным указанием языка (если поддерживается)
         urls_to_try = [
@@ -1094,10 +1083,10 @@ class GoogleSheetsParser:
                 print("    ✓ Страница загружена")
                 break
         
-        print("\n⏳ Настройка языка и ожидание загрузки...")
+        print("\n Настройка языка и ожидание загрузки...")
         
         # Сначала устанавливаем язык через localStorage ДО основной загрузки
-        print("  📍 Предварительная установка языка...")
+        print("  Предварительная установка языка...")
         self.driver.execute_script("""
             localStorage.setItem('i18nextLng', 'ru');
             localStorage.setItem('lang', 'ru');
@@ -1107,35 +1096,35 @@ class GoogleSheetsParser:
         """)
         
         # Обновляем страницу чтобы применился язык
-        print("  📍 Обновление страницы для применения языка...")
+        print("  Обновление страницы для применения языка...")
         self.driver.refresh()
         time.sleep(5)
         
         # Теперь пробуем переключить язык через интерфейс
         self.select_russian_language()
         
-        print("\n📋 Информация о странице:")
+        print("\n Информация о странице:")
         print(f"  • URL: {self.driver.current_url[:80]}...")
         print(f"  • Заголовок: {self.driver.title}")
         
         # Ждем загрузки страницы и проверяем язык
         if not self.wait_for_table_and_select_language():
-            print("\n❌ Не удалось загрузить данные")
+            print("\n Не удалось загрузить данные")
             
             # Последняя попытка - продолжаем с текущим языком
-            print("\n⚠️ ВНИМАНИЕ: Работаем с узбекским/английским интерфейсом")
+            print("\n ВНИМАНИЕ: Работаем с узбекским/английским интерфейсом")
             print("   Парсер адаптирован для работы с любым языком")
             
             # Проверяем есть ли таблица
             if not self.driver.find_elements(By.CSS_SELECTOR, 'tbody tr'):
-                print("\n❌ Таблица не найдена. Завершаем работу.")
+                print("\n Таблица не найдена. Завершаем работу.")
                 time.sleep(5)
                 self.driver.quit()
                 return
         
-        print("\n✅ ГОТОВО К ПАРСИНГУ!")
-        print("🚀 Запуск автоматического парсинга первых 2 страниц...")
-        print("\n⚠️ Для остановки нажмите: Ctrl+C")
+        print("\n ГОТОВО К ПАРСИНГУ!")
+        print(" Запуск автоматического парсинга первых 2 страниц...")
+        print("\n Для остановки нажмите: Ctrl+C")
         print("="*60)
         
         # Небольшая пауза перед началом
@@ -1144,7 +1133,7 @@ class GoogleSheetsParser:
         # Запускаем парсинг ТОЛЬКО 2 СТРАНИЦ
         self.parse_data_limited(start_page=1, max_pages=2)
         
-        print("\n🏁 Работа завершена!")
+        print("\n Работа завершена!")
         print("Браузер закроется через 5 секунд...")
         time.sleep(5)
         self.driver.quit()
@@ -1346,7 +1335,7 @@ class GoogleSheetsParser:
                 
                 # Статистика страницы
                 print(f"\n{'='*50}")
-                print(f"📊 ИТОГИ СТРАНИЦЫ {page_num}:")
+                print(f" ИТОГИ СТРАНИЦЫ {page_num}:")
                 print(f"  • Обработано: {len(data_rows)}")
                 print(f"  • Новых стоматологических: {page_dental_count}")
                 print(f"  • Пропущено дубликатов: {page_duplicates}")
@@ -1357,7 +1346,7 @@ class GoogleSheetsParser:
                 
                 # Проверяем, нужно ли переходить на следующую страницу
                 if pages_processed < max_pages:
-                    print(f"\n➡️ Переход на страницу {page_num + 1}...")
+                    print(f"\n Переход на страницу {page_num + 1}...")
                     if self.go_to_next_page(page_num + 1):
                         page_num += 1
                         time.sleep(3)
@@ -1365,11 +1354,11 @@ class GoogleSheetsParser:
                         print("❌ Не удалось перейти на следующую страницу")
                         break
                 else:
-                    print(f"\n✅ Обработано {max_pages} страниц - завершаем парсинг")
+                    print(f"\n Обработано {max_pages} страниц - завершаем парсинг")
                     break
                     
         except KeyboardInterrupt:
-            print("\n\n⚠️ ПАРСИНГ ОСТАНОВЛЕН ПОЛЬЗОВАТЕЛЕМ")
+            print("\n\n ПАРСИНГ ОСТАНОВЛЕН ПОЛЬЗОВАТЕЛЕМ")
         
         # Финальная статистика
         self.print_final_stats()
