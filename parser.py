@@ -1,3 +1,39 @@
+import os
+import json
+
+class GoogleSheetsParser:
+    def __init__(self):
+        # ... существующий код ...
+        
+        # Определяем окружение
+        if 'GITHUB_ACTIONS' in os.environ:
+            # В GitHub Actions credentials берем из переменной окружения
+            credentials_json = os.environ.get('GOOGLE_CREDENTIALS')
+            with open('temp_credentials.json', 'w') as f:
+                f.write(credentials_json)
+            self.credentials_file = 'temp_credentials.json'
+        else:
+            # Локально используем обычный путь
+            self.credentials_file = r"C:\Users\Vasiliy\Desktop\Парсер_лицензий\stomatologyscraper-7f64e5b6d7b7.json"
+    
+    def setup_driver(self):
+        """Настройка браузера"""
+        print("Запуск браузера...")
+        
+        # Определяем headless режим для GitHub Actions
+        headless = 'GITHUB_ACTIONS' in os.environ
+        
+        self.driver = Driver(
+            browser="chrome",
+            uc=True,
+            headless=headless,  # True в GitHub Actions
+            locale_code="ru"
+        )
+        
+        if headless:
+            print("✓ Браузер запущен в headless режиме (GitHub Actions)")
+        else:
+            print("✓ Браузер запущен")
 from seleniumbase import Driver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
